@@ -1,0 +1,14 @@
+# Sensitive files
+# secrets.yml is encrypted with ansible-vault and safe to commit
+.vault_pass
+*.xlsx
+*.xls
+
+# Temporary files
+/tmp/
+*.tmp
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class

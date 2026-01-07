@@ -1,0 +1,135 @@
+---
+- name: Query OMDb API and create Excel file
+  hosts: ditra
+  gather_facts: no
+  vars_files:
+    - vars/secrets.yml
+  vars:
+    search_term: "Matrix"
+    output_file: "movies_results.xlsx"
+    api_success: false
+    excel_success: false
+
+  tasks:
+    - name: Query OMDb API for movies
+      uri:
+        url: "http://www.omdbapi.com/?apikey={{ omdb_api_key }}&s={{ search_term }}"
+        method: GET
+        return_content: yes
+        status_code: 200
+        timeout: 10
+      register: api_response
+      ignore_errors: yes
+
+    - name: Check if API call was successful
+      set_fact:
+        api_success: "{{ api_response.status == 200 and api_response.json.Response == 'True' }}"
+      when: api_response is defined and api_response.status is defined
+
+    - name: Display API error if call failed
+      debug:
+        msg: "API call failed: {{ api_response.msg | default('Unknown error') }}"
+      when: not api_success
+
+    - name: Display API response error
+      debug:
+        msg: "API returned error: {{ api_response.json.Error }}"
+      when: api_response is defined and api_response.json is defined and api_response.json.Response == 'False'
+
+    - name: Copy Python script for Excel generation
+      copy:
+        src: create_excel.py
+        dest: "/tmp/create_excel.py"
+        mode: '0755'
+      when: api_success
+
+    - name: Save API response to temporary file
+      copy:
+        content: "{{ api_response.json | to_json }}"
+        dest: "/tmp/api_data.json"
+      when: api_success
+
+    - name: Install openpyxl via apt (Debian/Ubuntu)
+      apt:
+        name: python3-openpyxl
+        state: present
+        update_cache: no
+      become: yes
+      when: api_success
+      ignore_errors: yes
+      register: apt_install
+
+    - name: Install openpyxl via pip if apt failed
+      pip:
+        name: openpyxl
+        state: present
+        break_system_packages: yes
+      when: api_success and (apt_install is failed or apt_install is skipped)
+      ignore_errors: yes
+
+    - name: Create Excel file from API data
+      command: python3 /tmp/create_excel.py /tmp/api_data.json {{ output_file }}
+      register: excel_result
+      when: api_success
+      ignore_errors: yes
+
+    - name: Parse Excel creation result
+      set_fact:
+        excel_success: "{{ (excel_result.rc | default(1)) == 0 }}"
+        excel_output: "{{ excel_result.stdout | default('{}') | from_json if (excel_result.stdout | default('') | length > 0) else {} }}"
+      when: api_success and excel_result is defined
+
+    - name: Clean up temporary files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "/tmp/create_excel.py"
+        - "/tmp/api_data.json"
+      when: api_success
+
+    - name: Display final success message
+      debug:
+        msg:
+          - "================================"
+          - "EXECUTION SUCCESSFUL"
+          - "================================"
+          - "API Query: SUCCESS"
+          - "Excel Creation: SUCCESS"
+          - "File saved: {{ output_file }}"
+          - "Movies found: {{ api_response.json.Search | length }}"
+          - "================================"
+      when: api_success and excel_success
+
+    - name: Display Excel creation failure message
+      debug:
+        msg:
+          - "================================"
+          - "EXECUTION FAILED"
+          - "================================"
+          - "API Query: SUCCESS"
+          - "Excel Creation: FAILED"
+          - "Error: {{ excel_output.message | default('Unknown error creating Excel file') }}"
+          - "================================"
+      when: api_success and not excel_success
+
+    - name: Display API failure message
+      debug:
+        msg:
+          - "================================"
+          - "EXECUTION FAILED"
+          - "================================"
+          - "API Query: FAILED"
+          - "Error: Unable to connect to API or invalid response"
+          - "Please check your API key and internet connection"
+          - "================================"
+      when: not api_success
+
+    - name: Set final status
+      set_fact:
+        final_status: "{{ 'SUCCESS' if (api_success and excel_success) else 'FAILED' }}"
+
+    - name: Fail playbook if any step failed
+      fail:
+        msg: "Playbook execution failed. Check the messages above for details."
+      when: not (api_success and excel_success)

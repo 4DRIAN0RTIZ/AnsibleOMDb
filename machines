@@ -1,0 +1,7 @@
+[ditra]
+10.100.1.121
+10.100.1.234
+
+[ditra:vars]
+ansible_user=ditra
+
