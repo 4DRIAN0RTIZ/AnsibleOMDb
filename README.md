@@ -53,3 +53,9 @@ ansible-playbook api_to_excel.yml
 ```
 
 The Excel file will be created with columns: Title, Year, IMDb ID, Type, Poster URL.
+
+## Logs
+
+Playbook execution logs are saved to `ansible_api_excel.log`.
+
+See [LOG_FORMAT.md](LOG_FORMAT.md) for log format details.
