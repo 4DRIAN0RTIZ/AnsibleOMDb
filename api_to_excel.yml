@@ -12,7 +12,7 @@
     excel_success: false
     host_reachable: false
     log_file: "ansible_api_excel.log"
-    timestamp: "{{ ansible_date_time.iso8601 if ansible_date_time is defined else lookup('pipe', 'date +%Y-%m-%dT%H:%M:%SZ') }}"
+    timestamp: "{{ ansible_facts['date_time']['iso8601'] if ansible_facts['date_time'] is defined else lookup('pipe', 'date +%Y-%m-%dT%H:%M:%SZ') }}"
 
   tasks:
     - name: Test host connectivity
