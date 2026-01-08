@@ -1,245 +1,71 @@
----
-- name: Query OMDb API and create Excel file
+- name: Query OMDb API and create Excel
   hosts: ditra
   gather_facts: false
-  any_errors_fatal: false
   vars_files:
     - vars/secrets.yml
   vars:
     search_term: "Matrix"
     output_file: "movies_results.xlsx"
-    api_success: false
-    excel_success: false
-    host_reachable: false
     log_file: "ansible_api_excel.log"
-    timestamp: "{{ ansible_facts['date_time']['iso8601'] if ansible_facts['date_time'] is defined else lookup('pipe', 'date +%Y-%m-%dT%H:%M:%SZ') }}"
+    ts: "{{ lookup('pipe', 'date +%Y-%m-%dT%H:%M:%SZ') }}"
 
   tasks:
-    - name: Test host connectivity
-      ansible.builtin.wait_for_connection:
-        timeout: 10
-      register: connection_test
-      ignore_unreachable: true
-      ignore_errors: true
+    - name: Connectivity and API Process
+      block:
+        - name: Check host connectivity
+          ansible.builtin.wait_for_connection:
+            timeout: 10
+          register: connectivity_check
 
-    - name: Set host reachable status
-      ansible.builtin.set_fact:
-        host_reachable: "{{ connection_test is succeeded }}"
+        - name: Log Host Reachable
+          ansible.builtin.shell: |
+            echo "[{{ ts }}][SUCCESS] Host {{ inventory_hostname }} is reachable" >> "{{ log_file }}"
+          delegate_to: localhost
+          changed_when: false
 
-    - name: Log host unreachable event
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        line: >-
-          [{{ timestamp }}][ERROR] - host_unreachable : host={{ inventory_hostname }} Connection timeout after 10 seconds
-        create: true
-        mode: "0644"
-      delegate_to: localhost
-      when: not host_reachable
+        - name: Query OMDb API
+          ansible.builtin.uri:
+            url: "http://www.omdbapi.com/?apikey={{ omdb_api_key }}&s={{ search_term }}"
+            return_content: true
+          register: api_res
+          delegate_to: localhost
 
-    - name: Display host unreachable message
-      ansible.builtin.debug:
-        msg: >-
-          [{{ timestamp }}][ERROR] - host_unreachable : host={{ inventory_hostname }} Connection timeout after 10 seconds
-      when: not host_reachable
+        - name: Validate API Response
+          ansible.builtin.assert:
+            that:
+              - api_res.json.Response == "True"
+            fail_msg: "API Error: {{ api_res.json.Error | default('Unknown') }}"
 
-    - name: End play for unreachable hosts
-      ansible.builtin.meta: end_host
-      when: not host_reachable
+        - name: Save API data to temp file
+          ansible.builtin.copy:
+            content: "{{ api_res.json | to_json }}"
+            dest: "/tmp/api_data.json"
+            mode: "0644"
+          delegate_to: localhost
 
-    - name: Gather system facts
-      ansible.builtin.setup:
-      ignore_unreachable: true
-      failed_when: false
+        - name: Create Excel file
+          ansible.builtin.command: "python3 ./files/create_excel.py /tmp/api_data.json {{ output_file }}"
+          delegate_to: localhost
+          register: excel_creation
+          changed_when: excel_creation.rc == 0
 
-    - name: Log connectivity success
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        line: >-
-          [{{ timestamp }}][INFO] - host_reachable : host={{ inventory_hostname }} Host is online and accessible
-        create: true
-        mode: "0644"
-      delegate_to: localhost
+        - name: Remove temp file
+          ansible.builtin.file:
+            path: "/tmp/api_data.json"
+            state: absent
+          delegate_to: localhost
 
-    - name: Query OMDb API for movies
-      ansible.builtin.uri:
-        url: "http://www.omdbapi.com/?apikey={{ omdb_api_key }}&s={{ search_term }}"
-        method: GET
-        return_content: true
-        status_code: 200
-        timeout: 10
-      register: api_response
-      retries: 3
-      delay: 2
-      until: api_response.status is defined and api_response.status == 200
-      failed_when: false
+        - name: Log Success
+          ansible.builtin.shell: |
+            echo "[{{ ts }}][INFO] Host {{ inventory_hostname }} - Success: {{ search_term }} -> {{ output_file }}" >> "{{ log_file }}"
+          delegate_to: localhost
+          changed_when: false
 
-    - name: Check if API call was successful
-      ansible.builtin.set_fact:
-        api_success: "{{ api_response.status == 200 and api_response.json.Response == 'True' }}"
-      when: api_response is defined and api_response.status is defined
-
-    - name: Log API call failure
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        line: >-
-          [{{ timestamp }}][ERROR] - api_call_failed : host={{ inventory_hostname }}
-          search_term={{ search_term }} error={{ api_response.msg | default('Unknown error') }}
-        create: true
-        mode: "0644"
-      delegate_to: localhost
-      when: not api_success
-
-    - name: Display API error if call failed
-      ansible.builtin.debug:
-        msg: >-
-          [{{ timestamp }}][ERROR] - api_call_failed : host={{ inventory_hostname }}
-          search_term={{ search_term }} error={{ api_response.msg | default('Unknown error') }}
-      when: not api_success
-
-    - name: Log API response error
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        line: >-
-          [{{ timestamp }}][ERROR] - api_no_results : host={{ inventory_hostname }} search_term={{ search_term }} api_error={{ api_response.json.Error }}
-        create: true
-        mode: "0644"
-      delegate_to: localhost
-      when: api_response is defined and api_response.json is defined and api_response.json.Response == 'False'
-
-    - name: Display API response error
-      ansible.builtin.debug:
-        msg: >-
-          [{{ timestamp }}][ERROR] - api_no_results : host={{ inventory_hostname }} search_term={{ search_term }} api_error={{ api_response.json.Error }}
-      when: api_response is defined and api_response.json is defined and api_response.json.Response == 'False'
-
-    - name: Log API call success
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        line: >-
-          [{{ timestamp }}][INFO] - api_call_success : host={{ inventory_hostname }}
-          search_term={{ search_term }} results_count={{ api_response.json.Search | length }}
-        create: true
-        mode: "0644"
-      delegate_to: localhost
-      when: api_success
-
-    - name: Copy Python script for Excel generation
-      ansible.builtin.copy:
-        src: create_excel.py
-        dest: "/tmp/create_excel.py"
-        mode: "0755"
-      when: api_success
-
-    - name: Save API response to temporary file
-      ansible.builtin.copy:
-        content: "{{ api_response.json | to_json }}"
-        dest: "/tmp/api_data.json"
-        mode: "0644"
-      when: api_success
-
-    - name: Install openpyxl via apt (Debian/Ubuntu)
-      ansible.builtin.apt:
-        name: python3-openpyxl
-        state: present
-        update_cache: false
-      become: true
-      when: api_success
-      failed_when: false
-      register: apt_install
-
-    - name: Install openpyxl via pip if apt failed
-      ansible.builtin.pip:
-        name: openpyxl
-        state: present
-        break_system_packages: true
-      when: api_success and (apt_install is failed or apt_install is skipped)
-      failed_when: false
-
-    - name: Create Excel file from API data
-      ansible.builtin.command: python3 /tmp/create_excel.py /tmp/api_data.json {{ output_file }}
-      register: excel_result
-      when: api_success
-      failed_when: false
-      changed_when: excel_result.rc == 0
-
-    - name: Parse Excel creation result
-      ansible.builtin.set_fact:
-        excel_success: "{{ (excel_result.rc | default(1)) == 0 }}"
-        excel_output: "{{ excel_result.stdout | default('{}') | from_json if (excel_result.stdout | default('') | length > 0) else {} }}"
-      when: api_success and excel_result is defined
-
-    - name: Clean up temporary files
-      ansible.builtin.file:
-        path: "{{ item }}"
-        state: absent
-      loop:
-        - "/tmp/create_excel.py"
-        - "/tmp/api_data.json"
-      when: api_success
-
-    - name: Log Excel creation success
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        line: >-
-          [{{ timestamp }}][INFO] - excel_created : host={{ inventory_hostname }}
-          output_file={{ output_file }} movies_count={{ api_response.json.Search | length }}
-        create: true
-        mode: "0644"
-      delegate_to: localhost
-      when: api_success and excel_success
-
-    - name: Display final success message
-      ansible.builtin.debug:
-        msg: >-
-          [{{ timestamp }}][INFO] - execution_complete : host={{ inventory_hostname }}
-          output_file={{ output_file }} movies_count={{ api_response.json.Search | length }}
-      when: api_success and excel_success
-
-    - name: Log Excel creation failure
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        line: >-
-          [{{ timestamp }}][ERROR] - excel_creation_failed : host={{ inventory_hostname }}
-          error={{ excel_output.message | default('Unknown error creating Excel file') }}
-        create: true
-        mode: "0644"
-      delegate_to: localhost
-      when: api_success and not excel_success
-
-    - name: Display Excel creation failure message
-      ansible.builtin.debug:
-        msg: >-
-          [{{ timestamp }}][ERROR] - excel_creation_failed : host={{ inventory_hostname }}
-          error={{ excel_output.message | default('Unknown error creating Excel file') }}
-      when: api_success and not excel_success
-
-    - name: Log API query failure
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        line: >-
-          [{{ timestamp }}][ERROR] - api_query_failed : host={{ inventory_hostname }} Unable to connect to API or invalid response
-        create: true
-        mode: "0644"
-      delegate_to: localhost
-      when: not api_success
-
-    - name: Display API failure message
-      ansible.builtin.debug:
-        msg: >-
-          [{{ timestamp }}][ERROR] - api_query_failed : host={{ inventory_hostname }} Unable to connect to API or invalid response
-      when: not api_success
-
-    - name: Set final status
-      ansible.builtin.set_fact:
-        final_status: "{{ 'SUCCESS' if (api_success and excel_success) else 'FAILED' }}"
-
-    - name: Log final execution status
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        line: >-
-          [{{ timestamp }}][{{ 'INFO' if final_status == 'SUCCESS' else 'ERROR' }}]
-          - execution_{{ final_status | lower }} : host={{ inventory_hostname }}
-          Final execution status={{ final_status }}
-        create: true
-        mode: "0644"
-      delegate_to: localhost
+      rescue:
+        - name: Log Failure
+          ansible.builtin.shell: |
+            echo "[{{ ts }}][ERROR] Host {{ inventory_hostname }} - \
+            {{ ansible_failed_task.name }}: \
+            {{ ansible_failed_result.msg | default('Execution failed') }}" >> "{{ log_file }}"
+          delegate_to: localhost
+          changed_when: false
