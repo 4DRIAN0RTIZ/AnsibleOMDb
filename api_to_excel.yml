@@ -10,7 +10,7 @@
     ts: "{{ lookup('pipe', 'date +%Y-%m-%dT%H:%M:%SZ') }}"
 
   tasks:
-    - name: Connectivity and API Process
+    - name: Check Host Connectivity
       block:
         - name: Check host connectivity
           ansible.builtin.wait_for_connection:
@@ -23,6 +23,23 @@
           delegate_to: localhost
           changed_when: false
 
+        - name: Set connectivity flag
+          ansible.builtin.set_fact:
+            host_is_reachable: true
+
+      rescue:
+        - name: Log Host Unreachable
+          ansible.builtin.shell: |
+            echo "[{{ ts }}][WARNING] Host {{ inventory_hostname }} is unreachable, continuing with API process" >> "{{ log_file }}"
+          delegate_to: localhost
+          changed_when: false
+
+        - name: Set connectivity flag
+          ansible.builtin.set_fact:
+            host_is_reachable: false
+
+    - name: API Process
+      block:
         - name: Query OMDb API
           ansible.builtin.uri:
             url: "http://www.omdbapi.com/?apikey={{ omdb_api_key }}&s={{ search_term }}"
@@ -36,30 +53,45 @@
               - api_res.json.Response == "True"
             fail_msg: "API Error: {{ api_res.json.Error | default('Unknown') }}"
 
+        - name: Debug API Response
+          ansible.builtin.debug:
+            msg:
+              - "API Status: {{ api_res.status }}"
+              - "Response: {{ api_res.json.Response }}"
+              - "Total Results: {{ api_res.json.totalResults | default('N/A') }}"
+              - "Search Term: {{ search_term }}"
+              - "Results Found: {{ api_res.json.Search | length if api_res.json.Response == 'True' else 0 }}"
+          delegate_to: localhost
+          when: not (host_is_reachable | default(false))
+
         - name: Save API data to temp file
           ansible.builtin.copy:
             content: "{{ api_res.json | to_json }}"
             dest: "/tmp/api_data.json"
             mode: "0644"
           delegate_to: localhost
+          when: host_is_reachable | default(false)
 
         - name: Create Excel file
           ansible.builtin.command: "python3 ./files/create_excel.py /tmp/api_data.json {{ output_file }}"
           delegate_to: localhost
           register: excel_creation
           changed_when: excel_creation.rc == 0
+          when: host_is_reachable | default(false)
 
         - name: Remove temp file
           ansible.builtin.file:
             path: "/tmp/api_data.json"
             state: absent
           delegate_to: localhost
+          when: host_is_reachable | default(false)
 
         - name: Log Success
           ansible.builtin.shell: |
             echo "[{{ ts }}][INFO] Host {{ inventory_hostname }} - Success: {{ search_term }} -> {{ output_file }}" >> "{{ log_file }}"
           delegate_to: localhost
           changed_when: false
+          when: host_is_reachable | default(false)
 
       rescue:
         - name: Log Failure
